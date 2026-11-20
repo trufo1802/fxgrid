@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FX Grid</title>
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FX Grid">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262c36; --text: #e6edf3; --muted: #8b949e;
+    --accent: #4c8dff; --warn: #d29922;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f8fa; --panel: #ffffff; --line: #d8dee4; --text: #1f2328; --muted: #656d76;
+    --accent: #0969da; --warn: #9a6700;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    padding: calc(env(safe-area-inset-top) + 8px) 12px 8px; border-bottom: 1px solid var(--line);
+  }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 650; }
+  button, select {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer;
+  }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button { white-space: nowrap; }
+  .spacer { flex: 1; }
+  #clock { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  main { padding: 10px 10px calc(env(safe-area-inset-bottom) + 16px); }
+  .note { color: var(--muted); font-size: 12px; margin: 0 2px 10px; }
+  .note b { color: var(--warn); font-weight: 600; }
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column; min-width: 0;
+  }
+  .tile .lbl {
+    display: flex; justify-content: space-between; gap: 6px; padding: 6px 9px 0;
+    font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden;
+  }
+  .tile .lbl span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .tile .lbl .ndf { color: var(--warn); }
+  .tile .w { height: var(--tile-h, 190px); }
+  .tile .w .tradingview-widget-container, .tile .w .tradingview-widget-container__widget { height: 100%; }
+  #editor { display: none; margin-bottom: 10px; }
+  #editor.open { display: block; }
+  #editor textarea {
+    width: 100%; min-height: 220px; font: 12px/1.5 ui-monospace, Menlo, monospace;
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+  }
+  footer { color: var(--muted); font-size: 11px; text-align: center; padding: 8px 12px 24px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>FX Grid</h1>
+    <span id="clock"></span>
+    <span class="spacer"></span>
+    <select id="range" aria-label="Chart range">
+      <option value="1D">1D</option>
+      <option value="1M">1M</option>
+      <option value="3M">3M</option>
+      <option value="12M">1Y</option>
+      <option value="60M">5Y</option>
+    </select>
+    <select id="cols" aria-label="Columns">
+      <option value="1">1 col</option>
+      <option value="2">2 col</option>
+      <option value="3">3 col</option>
+      <option value="4">4 col</option>
+      <option value="5">5 col</option>
+    </select>
+    <button id="themeBtn" title="Toggle theme">◐</button>
+    <button id="editBtn" title="Edit symbols for this tab">Edit</button>
+  </div>
+  <div class="row tabs" id="tabs"></div>
+</header>
+
+<main>
+  <div id="editor">
+    <p class="note">One symbol per line: <code>EXCHANGE:TICKER | label | note</code>. Find tickers with TradingView symbol search. Saved on this device only.</p>
+    <textarea id="editText" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="saveBtn">Save</button>
+      <button id="resetBtn">Reset tab to default</button>
+      <button id="cancelBtn">Cancel</button>
+    </div>
+  </div>
+  <p class="note" id="tabNote"></p>
+  <div class="grid" id="grid"></div>
+</main>
+<footer>Charts &amp; quotes by <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> widgets. Indicative only, may be delayed.</footer>
+
+<script>
+// ---- Default watchlists ---------------------------------------------------
+// Format: "EXCHANGE:TICKER | label | note"
+const DEFAULT_TABS = {
+  "Asia (NDF ccys)": {
+    note: "<b>NDF proxy</b> = Pepperstone CFD, typically priced off offshore 1M NDF (gap vs spot ≈ fwd points). Indicative only. FX_IDC INR spot stops after onshore hours. No free PHP NDF feed.",
+    symbols: [
+      "FX_IDC:USDKRW | USD/KRW | spot",
+      "PEPPERSTONE:USDKRW | USD/KRW | NDF proxy (broker)",
+      "FX_IDC:USDINR | USD/INR | spot",
+      "PEPPERSTONE:USDINR | USD/INR | NDF proxy (broker)",
+      "FX_IDC:USDIDR | USD/IDR | spot",
+      "PEPPERSTONE:USDIDR | USD/IDR | NDF proxy (broker)",
+      "PYTH:USDPHP | USD/PHP | spot",
+      "FX_IDC:USDPHP | USD/PHP | spot (alt feed)",
+      "FX_IDC:USDTWD | USD/TWD | spot",
+      "FX:USDCNH | USD/CNH | offshore",
+      "FX_IDC:USDSGD | USD/SGD | spot",
+      "FX_IDC:USDTHB | USD/THB | spot",
+      "FX_IDC:USDMYR | USD/MYR | spot",
+      "FX:USDJPY | USD/JPY | spot",
+    ],
+  },
+  "G10": {
+    note: "USD vs G10. DXY is the ICE dollar index.",
+    symbols: [
+      "CAPITALCOM:DXY | DXY | index (CFD)",
+      "FX:EURUSD | EUR/USD | spot",
+      "FX:USDJPY | USD/JPY | spot",
+      "FX:GBPUSD | GBP/USD | spot",
+      "FX:AUDUSD | AUD/USD | spot",
+      "FX:NZDUSD | NZD/USD | spot",
+      "FX:USDCAD | USD/CAD | spot",
+      "FX:USDCHF | USD/CHF | spot",
+      "FX_IDC:USDNOK | USD/NOK | spot",
+      "FX_IDC:USDSEK | USD/SEK | spot",
+    ],
+  },
+  "EM other": {
+    note: "Other EM USD pairs.",
+    symbols: [
+      "FX_IDC:USDMXN | USD/MXN | spot",
+      "FX_IDC:USDBRL | USD/BRL | spot (NDF ccy)",
+      "FX_IDC:USDZAR | USD/ZAR | spot",
+      "FX_IDC:USDTRY | USD/TRY | spot",
+      "FX_IDC:USDCLP | USD/CLP | spot (NDF ccy)",
+      "FX_IDC:USDCOP | USD/COP | spot (NDF ccy)",
+      "FX_IDC:USDPLN | USD/PLN | spot",
+      "FX_IDC:USDHUF | USD/HUF | spot",
+    ],
+  },
+  "Commodities": {
+    note: "Spot / CFD-style continuous quotes.",
+    symbols: [
+      "TVC:GOLD | Gold | spot",
+      "TVC:SILVER | Silver | spot",
+      "TVC:PLATINUM | Platinum | spot",
+      "TVC:USOIL | WTI | crude",
+      "TVC:UKOIL | Brent | crude",
+      "OANDA:NATGASUSD | Nat gas | CFD",
+      "OANDA:XCUUSD | Copper | CFD",
+      "CAPITALCOM:CORN | Corn | CFD",
+    ],
+  },
+  "Risk": {
+    note: "Risk gauges that tend to drive USD/Asia. Free widgets block intraday bond yields; you can add FRED:DGS10 / FRED:DGS2 (daily UST yields) via Edit, but they only draw on 1M+ ranges.",
+    symbols: [
+      "CAPITALCOM:DXY | DXY | index (CFD)",
+      "CAPITALCOM:VIX | VIX | vol (CFD)",
+      "FOREXCOM:SPXUSD | S&P 500 | CFD",
+      "OANDA:JP225USD | Nikkei 225 | CFD",
+      "OANDA:CN50USD | China A50 | CFD",
+      "BITSTAMP:BTCUSD | BTC/USD | crypto",
+    ],
+  },
+};
+
+// ---- State ---------------------------------------------------------------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("fxgrid:" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("fxgrid:" + k, JSON.stringify(v)); } catch {} },
+};
+const tabNames = Object.keys(DEFAULT_TABS);
+const defaultCols = window.innerWidth < 600 ? 2 : window.innerWidth < 1000 ? 3 : 4;
+let state = {
+  tab: store.get("tab", tabNames[0]),
+  range: store.get("range", "1D"),
+  cols: store.get("cols", defaultCols),
+  theme: store.get("theme", matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"),
+  custom: store.get("custom", {}),
+};
+if (!tabNames.includes(state.tab)) state.tab = tabNames[0];
+
+const $ = (id) => document.getElementById(id);
+const symbolsFor = (tab) => state.custom[tab] || DEFAULT_TABS[tab].symbols;
+const parse = (line) => {
+  const [sym, label, note] = line.split("|").map((s) => (s || "").trim());
+  return { sym, label: label || sym.split(":").pop(), note: note || "" };
+};
+
+// ---- Rendering -------------------------------------------------------------
+function renderTabs() {
+  $("tabs").innerHTML = "";
+  for (const name of tabNames) {
+    const b = document.createElement("button");
+    b.textContent = name;
+    b.setAttribute("aria-pressed", String(name === state.tab));
+    b.onclick = () => { state.tab = name; store.set("tab", name); closeEditor(); renderTabs(); renderGrid(); };
+    $("tabs").appendChild(b);
+  }
+}
+
+function widget(sym) {
+  const wrap = document.createElement("div");
+  wrap.className = "tradingview-widget-container";
+  const inner = document.createElement("div");
+  inner.className = "tradingview-widget-container__widget";
+  wrap.appendChild(inner);
+  const s = document.createElement("script");
+  s.src = "https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js";
+  s.async = true;
+  s.text = JSON.stringify({
+    symbol: sym, width: "100%", height: "100%", locale: "en",
+    dateRange: state.range, colorTheme: state.theme, isTransparent: true,
+    autosize: true, largeChartUrl: "", chartOnly: false, noTimeScale: false,
+  });
+  wrap.appendChild(s);
+  return wrap;
+}
+
+function renderGrid() {
+  const grid = $("grid");
+  grid.innerHTML = "";
+  grid.style.setProperty("--cols", state.cols);
+  grid.style.setProperty("--tile-h", state.cols >= 4 ? "180px" : state.cols == 1 ? "220px" : "190px");
+  $("tabNote").innerHTML = DEFAULT_TABS[state.tab].note;
+  for (const line of symbolsFor(state.tab)) {
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const { sym, label, note } = parse(line);
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    const lbl = document.createElement("div");
+    lbl.className = "lbl";
+    lbl.innerHTML = `<span></span><span class="${/ndf/i.test(note) ? "ndf" : ""}"></span>`;
+    lbl.children[0].textContent = label;
+    lbl.children[1].textContent = note;
+    const w = document.createElement("div");
+    w.className = "w";
+    w.appendChild(widget(sym));
+    tile.append(lbl, w);
+    grid.appendChild(tile);
+  }
+}
+
+// ---- Controls ---------------------------------------------------------------
+function applyTheme() { document.documentElement.dataset.theme = state.theme; }
+$("range").value = state.range;
+$("cols").value = String(state.cols);
+$("range").onchange = (e) => { state.range = e.target.value; store.set("range", state.range); renderGrid(); };
+$("cols").onchange = (e) => { state.cols = +e.target.value; store.set("cols", state.cols); renderGrid(); };
+$("themeBtn").onclick = () => { state.theme = state.theme === "dark" ? "light" : "dark"; store.set("theme", state.theme); applyTheme(); renderGrid(); };
+
+function closeEditor() { $("editor").classList.remove("open"); }
+$("editBtn").onclick = () => {
+  $("editText").value = symbolsFor(state.tab).join("\n");
+  $("editor").classList.toggle("open");
+};
+$("cancelBtn").onclick = closeEditor;
+$("saveBtn").onclick = () => {
+  state.custom[state.tab] = $("editText").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  store.set("custom", state.custom); closeEditor(); renderGrid();
+};
+$("resetBtn").onclick = () => {
+  delete state.custom[state.tab]; store.set("custom", state.custom); closeEditor(); renderGrid();
+};
+
+// Clock: show Seoul / London / New York so you know which session is driving the move.
+function tick() {
+  const f = (tz) => new Date().toLocaleTimeString("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit" });
+  $("clock").textContent = `SEL ${f("Asia/Seoul")} · LDN ${f("Europe/London")} · NY ${f("America/New_York")}`;
+}
+tick(); setInterval(tick, 30000);
+
+// Rebuild widgets when the app comes back to the foreground (iOS suspends iframes).
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hiddenAt = Date.now();
+  else if (hiddenAt && Date.now() - hiddenAt > 5 * 60 * 1000) renderGrid();
+});
+
+applyTheme(); renderTabs(); renderGrid();
+</script>
+</body>
+</html>
