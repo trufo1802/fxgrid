@@ -55,7 +55,16 @@
   .tile .lbl span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .tile .lbl .ndf { color: var(--warn); }
   .tile .w { height: var(--tile-h, 190px); }
-  .tile .w .tradingview-widget-container, .tile .w .tradingview-widget-container__widget { height: 100%; }
+  .tile .w.pending { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; }
+  .tile .w .tradingview-widget-container { height: 100%; }
+  .tile .w .tradingview-widget-container__widget { height: calc(100% - 18px); }
+  .tile .w .tradingview-widget-copyright {
+    height: 18px; line-height: 18px; font-size: 10px; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px;
+    direction: rtl; /* narrow tiles clip the start, so "…on TradingView" always stays readable */
+  }
+  .tile .w .tradingview-widget-copyright a { color: var(--muted); text-decoration: none; }
+  #perf { color: var(--warn); font-size: 12px; font-variant-numeric: tabular-nums; }
   #editor { display: none; margin-bottom: 10px; }
   #editor.open { display: block; }
   #editor textarea {
@@ -71,6 +80,7 @@
   <div class="row">
     <h1>FX Grid</h1>
     <span id="clock"></span>
+    <span id="perf"></span>
     <span class="spacer"></span>
     <select id="range" aria-label="Chart range">
       <option value="1D">1D</option>
@@ -225,6 +235,17 @@ function widget(sym) {
   const inner = document.createElement("div");
   inner.className = "tradingview-widget-container__widget";
   wrap.appendChild(inner);
+  // TradingView attribution, as in their official embed snippet. Must stay visible.
+  const cr = document.createElement("div");
+  cr.className = "tradingview-widget-copyright";
+  const a = document.createElement("a");
+  a.href = "https://www.tradingview.com/";
+  a.target = "_blank";
+  a.rel = "noopener nofollow";
+  a.textContent = "Track all markets on TradingView";
+  cr.appendChild(a);
+  wrap.appendChild(cr);
+  if (PERF.on) PERF.watch(wrap);
   const s = document.createElement("script");
   s.src = "https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js";
   s.async = true;
@@ -237,11 +258,61 @@ function widget(sym) {
   return wrap;
 }
 
+// ---- Load-time readout ------------------------------------------------------
+// Open once with ?perf to turn on (remembered on this device, also in the home-screen app); ?perf=0 turns off.
+const PERF = {
+  on: (() => {
+    const q = new URLSearchParams(location.search);
+    if (q.has("perf")) store.set("perf", q.get("perf") !== "0");
+    return store.get("perf", false);
+  })(),
+  t0: 0, started: 0, loaded: 0,
+  reset() { this.t0 = performance.now(); this.started = 0; this.loaded = 0; this.show(); },
+  show() {
+    if (!this.on) return;
+    const s = ((performance.now() - this.t0) / 1000).toFixed(1);
+    $("perf").textContent = `${this.loaded}/${this.started} tiles · ${s}s`;
+  },
+  // Count an iframe as loaded when its load event fires.
+  watch(wrap) {
+    this.started++; this.show();
+    const mo = new MutationObserver(() => {
+      const f = wrap.querySelector("iframe");
+      if (!f) return;
+      mo.disconnect();
+      f.addEventListener("load", () => { this.loaded++; this.show(); }, { once: true });
+    });
+    mo.observe(wrap, { childList: true, subtree: true });
+  },
+};
+
+// ---- Lazy loading -------------------------------------------------------------
+// Each widget is its own iframe; loading 14 at once is what makes the phone slow.
+// Only build a widget when its tile is on screen (or within 300px of it).
+let io = null;
+function loadTile(w) {
+  w.classList.remove("pending");
+  w.textContent = "";
+  w.appendChild(widget(w.dataset.sym));
+}
+
 function renderGrid() {
   const grid = $("grid");
+  if (io) io.disconnect();
+  io = "IntersectionObserver" in window
+    ? new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          io.unobserve(e.target);
+          loadTile(e.target);
+        }
+      }, { rootMargin: "300px 0px" })
+    : null;
+  PERF.reset();
   grid.innerHTML = "";
   grid.style.setProperty("--cols", state.cols);
-  grid.style.setProperty("--tile-h", state.cols >= 4 ? "180px" : state.cols == 1 ? "220px" : "190px");
+  // +18px over the old heights makes room for the attribution line.
+  grid.style.setProperty("--tile-h", state.cols >= 4 ? "198px" : state.cols == 1 ? "238px" : "208px");
   $("tabNote").innerHTML = DEFAULT_TABS[state.tab].note;
   for (const line of symbolsFor(state.tab)) {
     if (!line.trim() || line.trim().startsWith("#")) continue;
@@ -254,10 +325,12 @@ function renderGrid() {
     lbl.children[0].textContent = label;
     lbl.children[1].textContent = note;
     const w = document.createElement("div");
-    w.className = "w";
-    w.appendChild(widget(sym));
+    w.className = "w pending";
+    w.dataset.sym = sym;
+    w.textContent = "loading…";
     tile.append(lbl, w);
     grid.appendChild(tile);
+    if (io) io.observe(w); else loadTile(w);
   }
 }
 
