@@ -44,9 +44,16 @@ async function decryptFile(file, pass) {
 
 const newPass = process.argv.includes("--new-passphrase");
 const tabs = JSON.parse(readFileSync(SRC, "utf8"));  // throws on bad JSON before we touch anything
+// Two tab shapes: {symbols: ["EXCHANGE:TICKER | label | note", ...]} or the FX generator
+// {type: "fx", ccys: ["EUR", ...], inverse: [...], ndf: {CCY: "EXCHANGE:USDCCY" | null}}.
 for (const [name, t] of Object.entries(tabs)) {
-  if (!Array.isArray(t?.symbols)) throw new Error(`tab "${name}": "symbols" must be an array of strings`);
+  if (t?.type === "fx") {
+    if (!Array.isArray(t.ccys)) throw new Error(`tab "${name}": "ccys" must be an array of currency codes`);
+  } else if (!Array.isArray(t?.symbols)) {
+    throw new Error(`tab "${name}": "symbols" must be an array of strings`);
+  }
 }
+const count = (t) => (t.type === "fx" ? t.ccys : t.symbols).length;
 const old = existsSync(OUT) ? JSON.parse(readFileSync(OUT, "utf8")) : null;
 
 let pass = process.env.FXGRID_PASS ?? await ask(newPass || !old ? "New passphrase: " : "Passphrase: ");
@@ -71,5 +78,5 @@ const out = { v: 1, kdf: "PBKDF2-SHA256", iter: ITER, salt: b64(salt), iv: b64(i
 // Round-trip check before writing.
 if (await decryptFile(out, pass) !== JSON.stringify(tabs)) throw new Error("round-trip check failed");
 writeFileSync(OUT, JSON.stringify(out) + "\n");
-const n = Object.values(tabs).reduce((s, t) => s + t.symbols.length, 0);
-console.log(`lists.enc.json: ${Object.keys(tabs).length} tabs, ${n} symbols${newPass || !old ? " (new passphrase)" : ""}`);
+const n = Object.values(tabs).reduce((s, t) => s + count(t), 0);
+console.log(`lists.enc.json: ${Object.keys(tabs).length} tabs, ${n} entries${newPass || !old ? " (new passphrase)" : ""}`);

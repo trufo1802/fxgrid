@@ -54,6 +54,11 @@
   }
   .tile .lbl span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .tile .lbl .ndf { color: var(--warn); }
+  .tile .lbl .ret { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tile .lbl .up { color: #3fb950; }
+  .tile .lbl .dn { color: #f85149; }
+  .tile .w.na { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; }
+  #fxbar[hidden] { display: none; }
   .tile .w { height: var(--tile-h, 190px); }
   .tile .w.pending { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; }
   .tile .w .tradingview-widget-container { height: 100%; }
@@ -100,12 +105,18 @@
     <span id="clock"></span>
     <span id="perf"></span>
     <span class="spacer"></span>
-    <select id="range" aria-label="Chart range">
+    <!-- values are the mini widget's dateRange codes; 2D/3D don't exist there (silently fall back to 1Y) -->
+    <select id="range" aria-label="Chart length">
       <option value="1D">1D</option>
+      <option value="5D">5D</option>
       <option value="1M">1M</option>
       <option value="3M">3M</option>
+      <option value="6M">6M</option>
+      <option value="YTD">YTD</option>
       <option value="12M">1Y</option>
+      <option value="36M">3Y</option>
       <option value="60M">5Y</option>
+      <option value="ALL">All</option>
     </select>
     <select id="cols" aria-label="Columns">
       <option value="1">1 col</option>
@@ -119,11 +130,35 @@
     <button id="lockBtn" title="Forget the key on this device">Lock</button>
   </div>
   <div class="row tabs" id="tabs"></div>
+  <div class="row" id="fxbar" hidden>
+    <select id="quote" aria-label="Quote convention">
+      <option value="market">Market quote</option>
+      <option value="usd">All USD/xxx</option>
+      <option value="ccy">All xxx/USD</option>
+    </select>
+    <button id="ndfBtn" title="NDF currencies: show NDF proxy or onshore spot">NDF</button>
+    <span class="spacer"></span>
+    <span id="ecbAsof" class="note" style="margin:0"></span>
+    <select id="sortBy" aria-label="Sort by return">
+      <option value="">Sort: default</option>
+      <option value="1D">Sort: 1D</option>
+      <option value="2D">Sort: 2D</option>
+      <option value="3D">Sort: 3D</option>
+      <option value="1M">Sort: 1M</option>
+      <option value="3M">Sort: 3M</option>
+      <option value="6M">Sort: 6M</option>
+      <option value="YTD">Sort: YTD</option>
+      <option value="1Y">Sort: 1Y</option>
+      <option value="3Y">Sort: 3Y</option>
+      <option value="5Y">Sort: 5Y</option>
+    </select>
+    <button id="sortDir" title="Sort direction">▼</button>
+  </div>
 </header>
 
 <main>
   <div id="editor">
-    <p class="note">One symbol per line: <code>EXCHANGE:TICKER | label | note</code>. Find tickers with TradingView symbol search. Saved on this device only — to sync everywhere, Copy and paste into <code>lists.local.json</code> on the PC, then encrypt and push.</p>
+    <p class="note"><span id="editHelp"></span> To sync everywhere, Copy and paste into <code>lists.local.json</code> on the PC, then encrypt and push.</p>
     <textarea id="editText" spellcheck="false"></textarea>
     <div class="row">
       <button id="saveBtn">Save</button>
@@ -205,6 +240,10 @@ let state = {
   cols: store.get("cols", defaultCols),
   theme: store.get("theme", matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"),
   custom: store.get("custom", {}),
+  quote: store.get("quote", "market"),   // FX: market | usd (all USD/xxx) | ccy (all xxx/USD)
+  ndf: store.get("ndf", true),           // FX: NDF proxy (true) or onshore spot for NDF currencies
+  sortBy: store.get("sortBy", ""),       // FX: "" = list order, else a HORIZONS key
+  sortDesc: store.get("sortDesc", true),
 };
 function setTabs(tabs) {
   TABS = tabs;
@@ -213,11 +252,115 @@ function setTabs(tabs) {
 }
 
 const $ = (id) => document.getElementById(id);
-const symbolsFor = (tab) => state.custom[tab] || TABS[tab].symbols;
+const isFx = (tab) => TABS[tab]?.type === "fx";
+// Editable lines for a tab: currency codes for the FX tab, "EXCHANGE:TICKER | label | note" otherwise.
+const symbolsFor = (tab) => state.custom[tab] || (isFx(tab) ? TABS[tab].ccys : TABS[tab].symbols);
 const parse = (line) => {
   const [sym, label, note] = line.split("|").map((s) => (s || "").trim());
   return { sym, label: label || sym.split(":").pop(), note: note || "" };
 };
+
+// FX tiles are generated: per currency, pick NDF proxy vs spot and the quote direction.
+// NDF proxies only exist as USD/xxx (expression symbols like 1/X break the widget), so they
+// ignore the xxx/USD setting. Spot uses FX_IDC, which carries both directions for every ccy here.
+function fxEntries(tab) {
+  const t = TABS[tab];
+  return symbolsFor(tab).map((ccy) => {
+    const ndfSym = t.ndf?.[ccy];
+    const isNdfCcy = !!t.ndf && ccy in t.ndf;
+    const wantInv = state.quote === "market" ? (t.inverse || []).includes(ccy) : state.quote === "ccy";
+    if (isNdfCcy && state.ndf && ndfSym) {
+      return { sym: ndfSym, label: `USD/${ccy}`, note: wantInv ? "NDF · USD/xxx only" : "NDF", ccy, inv: false };
+    }
+    return {
+      sym: wantInv ? `FX_IDC:${ccy}USD` : `FX_IDC:USD${ccy}`,
+      label: wantInv ? `${ccy}/USD` : `USD/${ccy}`,
+      note: isNdfCcy ? (ndfSym ? "onshore spot" : "spot · no NDF feed") : "spot",
+      ccy, inv: wantInv,
+    };
+  });
+}
+const entriesFor = (tab) => isFx(tab)
+  ? fxEntries(tab)
+  : symbolsFor(tab).filter((l) => l.trim() && !l.trim().startsWith("#")).map(parse);
+
+// Chart length: some tabs (monthly FRED data) need a floor, or the widget shows "unsupported interval".
+const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "12M", "36M", "60M", "ALL"];
+function rangeFor(tab) {
+  const min = TABS[tab].minRange;
+  return min && RANGES.indexOf(state.range) < RANGES.indexOf(min) ? min : state.range;
+}
+
+// ---- FX returns from ECB reference rates (api.frankfurter.dev, free, no key, CORS) -----------
+// Rates are CCY per USD at the ECB daily fix (~16:00 CET). Returns are simple, in percent:
+//   USD/xxx: now/past - 1      xxx/USD: past/now - 1
+// 1D/2D/3D = 1/2/3 fixes back; 1M..5Y = fix on or before the same calendar date back (the API
+// snaps weekends/holidays to the prior fix); YTD = last fix of the previous year.
+// ECB has CNY not CNH, and no TWD. Cached on the device for 6 h.
+const HORIZONS = ["1D", "2D", "3D", "1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y"];
+const ECB_CODE = { CNH: "CNY", TWD: null };
+const ecbCode = (ccy) => (ccy in ECB_CODE ? ECB_CODE[ccy] : ccy);
+const ECB = { data: store.get("ecb", null), loading: false };
+async function fetchEcb(ccys) {
+  const syms = [...new Set(ccys.map(ecbCode).filter(Boolean))].sort().join(",");
+  const api = "https://api.frankfurter.dev/v1/";
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const get = async (path) => {
+    const r = await fetch(api + path + (path.includes("?") ? "&" : "?") + `base=USD&symbols=${syms}`);
+    if (!r.ok) throw new Error(`ECB ${r.status}`);
+    return r.json();
+  };
+  const recent = await get(`${iso(new Date(Date.now() - 14 * 864e5))}..`);
+  const dates = Object.keys(recent.rates).sort();
+  const asof = dates[dates.length - 1];
+  const fixes = { now: recent.rates[asof] };
+  ["1D", "2D", "3D"].forEach((h, i) => { fixes[h] = recent.rates[dates[dates.length - 2 - i]]; });
+  const L = new Date(asof + "T00:00:00Z");
+  const monthsBack = (k) => {  // same day k months earlier, clamped to month end (Mar 31 - 1M = Feb 28/29)
+    const y = L.getUTCFullYear(), m = L.getUTCMonth() - k;
+    const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(y, m, Math.min(L.getUTCDate(), last)));
+  };
+  const back = { "1M": monthsBack(1), "3M": monthsBack(3), "6M": monthsBack(6), "1Y": monthsBack(12),
+    "3Y": monthsBack(36), "5Y": monthsBack(60), YTD: new Date(Date.UTC(L.getUTCFullYear() - 1, 11, 31)) };
+  await Promise.all(Object.entries(back).map(async ([h, d]) => { fixes[h] = (await get(iso(d))).rates; }));
+  return { at: Date.now(), syms, asof, fixes };
+}
+function refreshEcb() {
+  if (!isFx(state.tab) || ECB.loading) return;
+  const ccys = symbolsFor(state.tab);
+  const syms = [...new Set(ccys.map(ecbCode).filter(Boolean))].sort().join(",");
+  const d = ECB.data;
+  if (d && d.syms === syms && Date.now() - d.at < 6 * 3600e3) return;
+  ECB.loading = true;
+  fetchEcb(ccys)
+    .then((data) => {
+      ECB.data = data; store.set("ecb", data);
+      if (!isFx(state.tab)) return;
+      if (state.sortBy) renderGrid(); else fillBadges();  // re-sorting means rebuilding tiles
+    })
+    .catch(() => { $("ecbAsof").textContent = "ECB fetch failed"; })
+    .finally(() => { ECB.loading = false; });
+}
+// Return in % for a generated FX entry over horizon h, in the direction it is displayed; NaN if n/a.
+function fxRet(e, h) {
+  const f = ECB.data?.fixes, c = ecbCode(e.ccy);
+  const now = f?.now?.[c], past = f?.[h]?.[c];
+  if (!c || !now || !past) return NaN;
+  return 100 * (e.inv ? past / now - 1 : now / past - 1);
+}
+function fillBadges() {
+  const h = state.sortBy || "1D";
+  $("ecbAsof").textContent = ECB.data ? `ECB ${ECB.data.asof}` : "";
+  for (const tile of document.querySelectorAll("#grid .tile[data-ccy]")) {
+    let r = fxRet({ ccy: tile.dataset.ccy, inv: tile.dataset.inv === "1" }, h);
+    if (Math.abs(r) < 0.005) r = 0;  // no "-0.00%"
+    const el = tile.querySelector(".ret");
+    el.textContent = isNaN(r) ? `${h} n/a` : `${h} ${r >= 0 ? "+" : ""}${r.toFixed(2)}%`;
+    el.className = "ret " + (isNaN(r) ? "" : r >= 0 ? "up" : "dn");
+    el.title = ECB.data ? `ECB fix ${ECB.data.asof}` : "loading ECB fixes…";
+  }
+}
 
 // ---- Rendering -------------------------------------------------------------
 function renderTabs() {
@@ -231,7 +374,7 @@ function renderTabs() {
   }
 }
 
-function widget(sym) {
+function widget(sym, range) {
   const wrap = document.createElement("div");
   wrap.className = "tradingview-widget-container";
   const inner = document.createElement("div");
@@ -253,7 +396,7 @@ function widget(sym) {
   s.async = true;
   s.text = JSON.stringify({
     symbol: sym, width: "100%", height: "100%", locale: "en",
-    dateRange: state.range, colorTheme: state.theme, isTransparent: true,
+    dateRange: range, colorTheme: state.theme, isTransparent: true,
     autosize: true, largeChartUrl: "", chartOnly: false, noTimeScale: false,
   });
   wrap.appendChild(s);
@@ -295,7 +438,7 @@ let io = null;
 function loadTile(w) {
   w.classList.remove("pending");
   w.textContent = "";
-  w.appendChild(widget(w.dataset.sym));
+  w.appendChild(widget(w.dataset.sym, rangeFor(state.tab)));
 }
 
 function renderGrid() {
@@ -316,25 +459,36 @@ function renderGrid() {
   grid.style.setProperty("--cols", state.cols);
   // +18px over the old heights makes room for the attribution line.
   grid.style.setProperty("--tile-h", state.cols >= 4 ? "198px" : state.cols == 1 ? "238px" : "208px");
+  const fx = isFx(state.tab);
+  $("fxbar").hidden = !fx;
   $("tabNote").innerHTML = TABS[state.tab].note || "";
-  for (const line of symbolsFor(state.tab)) {
-    if (!line.trim() || line.trim().startsWith("#")) continue;
-    const { sym, label, note } = parse(line);
+  let entries = entriesFor(state.tab);
+  if (fx && state.sortBy && ECB.data) {
+    // n/a (e.g. TWD, no ECB fix) always last; ties keep list order.
+    entries = entries
+      .map((e, i) => ({ e, i, r: fxRet(e, state.sortBy) }))
+      .sort((a, b) => (isNaN(a.r) - isNaN(b.r)) || (state.sortDesc ? b.r - a.r : a.r - b.r) || a.i - b.i)
+      .map((x) => x.e);
+  }
+  for (const { sym, label, note, ccy, inv } of entries) {
     const tile = document.createElement("div");
     tile.className = "tile";
     const lbl = document.createElement("div");
     lbl.className = "lbl";
-    lbl.innerHTML = `<span></span><span class="${/ndf/i.test(note) ? "ndf" : ""}"></span>`;
-    lbl.children[0].textContent = label;
-    lbl.children[1].textContent = note;
+    lbl.innerHTML = `<span></span>${fx ? '<span class="ret"></span>' : ""}<span class="${/^ndf/i.test(note) ? "ndf" : ""}"></span>`;
+    lbl.firstChild.textContent = label;
+    lbl.lastChild.textContent = note;
+    if (fx) { tile.dataset.ccy = ccy; tile.dataset.inv = inv ? "1" : "0"; }
     const w = document.createElement("div");
+    tile.append(lbl, w);
+    grid.appendChild(tile);
+    if (sym === "-") { w.className = "w na"; w.textContent = "no free widget data"; continue; }
     w.className = "w pending";
     w.dataset.sym = sym;
     w.textContent = "loading…";
-    tile.append(lbl, w);
-    grid.appendChild(tile);
     if (io) io.observe(w); else loadTile(w);
   }
+  if (fx) { fillBadges(); refreshEcb(); }
 }
 
 // ---- Controls ---------------------------------------------------------------
@@ -345,14 +499,43 @@ $("range").onchange = (e) => { state.range = e.target.value; store.set("range", 
 $("cols").onchange = (e) => { state.cols = +e.target.value; store.set("cols", state.cols); renderGrid(); };
 $("themeBtn").onclick = () => { state.theme = state.theme === "dark" ? "light" : "dark"; store.set("theme", state.theme); applyTheme(); renderGrid(); };
 
+// FX bar
+const setFx = (k, v) => { state[k] = v; store.set(k, v); };
+const syncFxBar = () => {
+  $("quote").value = state.quote;
+  $("ndfBtn").textContent = state.ndf ? "NDF" : "Spot";
+  $("ndfBtn").setAttribute("aria-pressed", String(state.ndf));
+  $("sortBy").value = state.sortBy;
+  $("sortDir").textContent = state.sortDesc ? "▼" : "▲";
+  $("sortDir").title = state.sortDesc ? "Highest first" : "Lowest first";
+};
+syncFxBar();
+$("quote").onchange = (e) => { setFx("quote", e.target.value); renderGrid(); };
+$("ndfBtn").onclick = () => { setFx("ndf", !state.ndf); syncFxBar(); renderGrid(); };
+// Picking a sort horizon also sets the chart length to match (2D/3D -> 5D, the shortest widget range
+// above 1D), so the badge and the chart cover the same window. Chart length can still be changed after.
+const SORT_RANGE = { "1D": "1D", "2D": "5D", "3D": "5D", "1M": "1M", "3M": "3M", "6M": "6M",
+  YTD: "YTD", "1Y": "12M", "3Y": "36M", "5Y": "60M" };
+$("sortBy").onchange = (e) => {
+  setFx("sortBy", e.target.value);
+  if (state.sortBy) { state.range = SORT_RANGE[state.sortBy]; store.set("range", state.range); $("range").value = state.range; }
+  renderGrid();
+};
+$("sortDir").onclick = () => { setFx("sortDesc", !state.sortDesc); syncFxBar(); if (state.sortBy) renderGrid(); };
+
+const editLines = () => $("editText").value.split("\n").map((l) => l.trim()).filter(Boolean);
 function closeEditor() { $("editor").classList.remove("open"); }
 $("editBtn").onclick = () => {
+  $("editHelp").innerHTML = isFx(state.tab)
+    ? "One currency code per line, in display order (e.g. <code>KRW</code>). Quote direction and NDF/spot come from the bar above. Saved on this device only."
+    : "One symbol per line: <code>EXCHANGE:TICKER | label | note</code>; <code>- | label | note</code> for an empty placeholder. Find tickers with TradingView symbol search. Saved on this device only.";
   $("editText").value = symbolsFor(state.tab).join("\n");
   $("editor").classList.toggle("open");
 };
 $("cancelBtn").onclick = closeEditor;
 $("saveBtn").onclick = () => {
-  state.custom[state.tab] = $("editText").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = editLines();
+  state.custom[state.tab] = isFx(state.tab) ? lines.map((l) => l.toUpperCase()).filter((l) => /^[A-Z]{3}$/.test(l)) : lines;
   store.set("custom", state.custom); closeEditor(); renderGrid();
 };
 $("resetBtn").onclick = () => {
@@ -360,8 +543,8 @@ $("resetBtn").onclick = () => {
 };
 // Copies this tab as a lists.local.json entry, so a phone edit can be made permanent on the PC.
 $("copyBtn").onclick = async () => {
-  const symbols = $("editText").value.split("\n").map((l) => l.trim()).filter(Boolean);
-  const text = JSON.stringify({ [state.tab]: { note: TABS[state.tab].note || "", symbols } }, null, 2).slice(2, -2);
+  const key = isFx(state.tab) ? "ccys" : "symbols";
+  const text = JSON.stringify({ [state.tab]: { ...TABS[state.tab], [key]: editLines() } }, null, 2).slice(2, -2);
   try { await navigator.clipboard.writeText(text); $("copyBtn").textContent = "Copied"; }
   catch { $("copyBtn").textContent = "Copy failed"; }
   setTimeout(() => { $("copyBtn").textContent = "Copy as JSON"; }, 1500);

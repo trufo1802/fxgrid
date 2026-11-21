@@ -11,9 +11,10 @@ GitHub Pages serves repo root, `.nojekyll` present). Last updated 2026-11-21 (re
 | 2 | Lazy-load tiles + load-time readout | **Done in code** |
 | 2b | iPhone test: first screen <3 s on LTE, no blank tiles after background | **To do — first, 5 min** |
 | 3 | Passphrase lock + watchlists synced PC → iPhone | **Done** — live; iPhone unlock not yet checked |
+| 3b | Tabs → FX / Rates / Equity / Commodity; FX quote + NDF toggles; ECB return sort | **Done** — see notes |
 | 4 | Tap tile → full-screen advanced chart | To do |
 | 5 | Manual tile tint (green/red) | To do |
-| 6 | Movers tab | To do — prototype first (open question 1) |
+| 6 | Movers tab | Mostly superseded by 3b's FX sort; revisit only for non-FX tabs |
 | 7 | Two-week daily-use check → decide native wrapper / v2 | To do |
 
 ## Scope
@@ -96,6 +97,22 @@ Re-add the home-screen icon after M3 ships if the start URL or manifest changes.
 - The current default watchlists are already in public git history (commits `beb56c2`…`13f95b2`). Leave them
   (generic FX pairs) unless you decide otherwise — rewriting needs a force-push on `main`.
 
+**M3b — four tabs + FX sort** (2026-11-21). Widget probes (local, real widgets) decided the symbols:
+- FX: NDF proxies exist only on Pepperstone for TWD/KRW/IDR/INR (none for PHP; Saxo absent), and only as
+  USD/xxx — expression symbols (`1/X`) break the widget, so NDF tiles ignore the xxx/USD setting. Spot uses
+  FX_IDC (both directions exist). Inverted tiny-price pairs (IDRUSD, PHPUSD, DKKUSD) show 0.00% in the widget
+  (rounding) — the ECB badge is the reliable number there.
+- Sort/badges: ECB fixes via api.frankfurter.dev (CORS, no key), simple % in the displayed direction, cached 6 h.
+  No TWD (n/a, sorted last); CNH uses CNY. Daily fix, not live. In "market quote" mode signs mix
+  (EUR/USD up = USD down) — use an all-USD/xxx or all-xxx/USD setting when sorting.
+- Chart lengths the mini widget accepts: 1D 5D 1M 3M 6M YTD 12M 36M 60M ALL. 2D/3D silently fall back to 12M,
+  so sort 2D/3D maps the chart to 5D. The widget's own % is always the 1-day change, whatever the range.
+- Rates: every TVC yield, OANDA bond CFD and CBOT future is "Permission denied" in free widgets. Only FRED
+  renders: DGS10 (daily) + OECD monthly 10Y for DE GB CH NO CA AU JP IN, and only on ranges ≥ 1Y
+  (`minRange: "12M"` on the tab). Other countries are `-` placeholders.
+- Equity: most local exchange indices are denied; CFDs where possible, US-listed country ETFs (USD) otherwise.
+- Commodity: 21 contracts; zinc and iron ore have no free feed. Old Risk tab (DXY/VIX/BTC) dropped.
+
 **M4 — tap tile → big chart.**
 - Mini widget is a cross-origin iframe, taps inside never reach the page. Tap target = label row (`.lbl`) or a
   ⤢ button on it (an overlay above the iframe kills the widget's own tap).
@@ -135,7 +152,8 @@ v1's reusable parts: the watchlist JSON format and the tab/tile UX — not the w
 - Node 24 + Python `cryptography` available on the Mac for the encrypt script.
 
 ## Open questions
-1. **Can a widget sort the user's own symbol list by change %?** → *prototype* (M6).
+1. ~~Can a widget sort the user's own symbol list by change %?~~ No — widgets never expose prices. FX sorts on
+   ECB fixes (M3b). Equity/Commodity/Rates sorting would need the v2 feed (question 3).
 2. **Are TradingView widgets allowed inside a third-party iOS app (WKWebView), private or App Store?**
    → *ask TradingView* via their widget contact form. Gates any native build beyond personal install and the
    whole "Public later" track.
