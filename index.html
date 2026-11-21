@@ -73,9 +73,27 @@
   }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 8px 12px 24px; }
   footer a { color: var(--muted); }
+  #lock { display: none; max-width: 320px; margin: 18vh auto 0; padding: 0 16px; }
+  body.locked #lock { display: block; }
+  body.locked header, body.locked main, body.locked footer { display: none; }
+  #lock h1 { margin: 0 0 12px; }
+  #lock input {
+    width: 100%; font: inherit; font-size: 16px; /* 16px stops iOS zooming into the field */
+    color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
+  }
+  #lock button { width: 100%; margin-top: 8px; padding: 9px; }
+  #lockMsg { color: var(--warn); font-size: 12px; min-height: 18px; margin: 8px 0 0; }
 </style>
 </head>
-<body>
+<body class="locked">
+<form id="lock" autocomplete="on">
+  <h1>FX Grid</h1>
+  <!-- hidden username lets iCloud Keychain save/fill the passphrase -->
+  <input type="text" name="username" value="fxgrid" autocomplete="username" hidden>
+  <input id="pass" type="password" name="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase">
+  <button type="submit" id="unlockBtn">Unlock</button>
+  <p id="lockMsg"></p>
+</form>
 <header>
   <div class="row">
     <h1>FX Grid</h1>
@@ -98,17 +116,19 @@
     </select>
     <button id="themeBtn" title="Toggle theme">◐</button>
     <button id="editBtn" title="Edit symbols for this tab">Edit</button>
+    <button id="lockBtn" title="Forget the key on this device">Lock</button>
   </div>
   <div class="row tabs" id="tabs"></div>
 </header>
 
 <main>
   <div id="editor">
-    <p class="note">One symbol per line: <code>EXCHANGE:TICKER | label | note</code>. Find tickers with TradingView symbol search. Saved on this device only.</p>
+    <p class="note">One symbol per line: <code>EXCHANGE:TICKER | label | note</code>. Find tickers with TradingView symbol search. Saved on this device only — to sync everywhere, Copy and paste into <code>lists.local.json</code> on the PC, then encrypt and push.</p>
     <textarea id="editText" spellcheck="false"></textarea>
     <div class="row">
       <button id="saveBtn">Save</button>
-      <button id="resetBtn">Reset tab to default</button>
+      <button id="copyBtn">Copy as JSON</button>
+      <button id="resetBtn">Reset tab to synced</button>
       <button id="cancelBtn">Cancel</button>
     </div>
   </div>
@@ -118,100 +138,82 @@
 <footer>Charts &amp; quotes by <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> widgets. Indicative only, may be delayed.</footer>
 
 <script>
-// ---- Default watchlists ---------------------------------------------------
-// Format: "EXCHANGE:TICKER | label | note"
-const DEFAULT_TABS = {
-  "Asia (NDF ccys)": {
-    note: "<b>NDF proxy</b> = Pepperstone CFD, typically priced off offshore 1M NDF (gap vs spot ≈ fwd points). Indicative only. FX_IDC INR spot stops after onshore hours. No free PHP NDF feed.",
-    symbols: [
-      "FX_IDC:USDKRW | USD/KRW | spot",
-      "PEPPERSTONE:USDKRW | USD/KRW | NDF proxy (broker)",
-      "FX_IDC:USDINR | USD/INR | spot",
-      "PEPPERSTONE:USDINR | USD/INR | NDF proxy (broker)",
-      "FX_IDC:USDIDR | USD/IDR | spot",
-      "PEPPERSTONE:USDIDR | USD/IDR | NDF proxy (broker)",
-      "PYTH:USDPHP | USD/PHP | spot",
-      "FX_IDC:USDPHP | USD/PHP | spot (alt feed)",
-      "FX_IDC:USDTWD | USD/TWD | spot",
-      "FX:USDCNH | USD/CNH | offshore",
-      "FX_IDC:USDSGD | USD/SGD | spot",
-      "FX_IDC:USDTHB | USD/THB | spot",
-      "FX_IDC:USDMYR | USD/MYR | spot",
-      "FX:USDJPY | USD/JPY | spot",
-    ],
+// ---- Watchlists: encrypted in the public repo, decrypted on this device ------
+// lists.enc.json = AES-256-GCM(JSON of {tab: {note, symbols: ["EXCHANGE:TICKER | label | note", ...]}}),
+// key = PBKDF2-SHA256(passphrase, salt, iter). Written by encrypt.mjs; keep the two in sync.
+// The derived key (never the passphrase) is kept on this device as a non-extractable CryptoKey in
+// IndexedDB, tagged with the salt; a new passphrase means a new salt, which invalidates stored keys.
+let TABS = null;
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const keyDB = {
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("fxgrid", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
   },
-  "G10": {
-    note: "USD vs G10. DXY is the ICE dollar index.",
-    symbols: [
-      "CAPITALCOM:DXY | DXY | index (CFD)",
-      "FX:EURUSD | EUR/USD | spot",
-      "FX:USDJPY | USD/JPY | spot",
-      "FX:GBPUSD | GBP/USD | spot",
-      "FX:AUDUSD | AUD/USD | spot",
-      "FX:NZDUSD | NZD/USD | spot",
-      "FX:USDCAD | USD/CAD | spot",
-      "FX:USDCHF | USD/CHF | spot",
-      "FX_IDC:USDNOK | USD/NOK | spot",
-      "FX_IDC:USDSEK | USD/SEK | spot",
-    ],
+  async op(mode, f) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction("kv", mode), r = f(t.objectStore("kv"));
+      t.oncomplete = () => res(r.result); t.onerror = () => rej(t.error);
+    });
   },
-  "EM other": {
-    note: "Other EM USD pairs.",
-    symbols: [
-      "FX_IDC:USDMXN | USD/MXN | spot",
-      "FX_IDC:USDBRL | USD/BRL | spot (NDF ccy)",
-      "FX_IDC:USDZAR | USD/ZAR | spot",
-      "FX_IDC:USDTRY | USD/TRY | spot",
-      "FX_IDC:USDCLP | USD/CLP | spot (NDF ccy)",
-      "FX_IDC:USDCOP | USD/COP | spot (NDF ccy)",
-      "FX_IDC:USDPLN | USD/PLN | spot",
-      "FX_IDC:USDHUF | USD/HUF | spot",
-    ],
-  },
-  "Commodities": {
-    note: "Spot / CFD-style continuous quotes.",
-    symbols: [
-      "TVC:GOLD | Gold | spot",
-      "TVC:SILVER | Silver | spot",
-      "TVC:PLATINUM | Platinum | spot",
-      "TVC:USOIL | WTI | crude",
-      "TVC:UKOIL | Brent | crude",
-      "OANDA:NATGASUSD | Nat gas | CFD",
-      "OANDA:XCUUSD | Copper | CFD",
-      "CAPITALCOM:CORN | Corn | CFD",
-    ],
-  },
-  "Risk": {
-    note: "Risk gauges that tend to drive USD/Asia. Free widgets block intraday bond yields; you can add FRED:DGS10 / FRED:DGS2 (daily UST yields) via Edit, but they only draw on 1M+ ranges.",
-    symbols: [
-      "CAPITALCOM:DXY | DXY | index (CFD)",
-      "CAPITALCOM:VIX | VIX | vol (CFD)",
-      "FOREXCOM:SPXUSD | S&P 500 | CFD",
-      "OANDA:JP225USD | Nikkei 225 | CFD",
-      "OANDA:CN50USD | China A50 | CFD",
-      "BITSTAMP:BTCUSD | BTC/USD | crypto",
-    ],
-  },
+  get() { return this.op("readonly", (s) => s.get("key")).catch(() => null); },
+  set(v) { return this.op("readwrite", (s) => s.put(v, "key")).catch(() => {}); },
+  clear() { return this.op("readwrite", (s) => s.delete("key")).catch(() => {}); },
 };
+async function deriveKey(pass, file) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: unb64(file.salt), iterations: file.iter },
+    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+}
+async function decryptLists(file, key) {  // throws on wrong key or tampered file (GCM auth)
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(file.iv) }, key, unb64(file.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+// Latest ciphertext from the site; falls back to the last copy seen on this device when offline.
+async function fetchLists() {
+  try {
+    const r = await fetch("lists.enc.json", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const f = await r.json();
+    try { localStorage.setItem("fxgrid:enc", JSON.stringify(f)); } catch {}
+    return f;
+  } catch {
+    try { return JSON.parse(localStorage.getItem("fxgrid:enc")); } catch { return null; }
+  }
+}
+// Try the stored key; returns tabs or null (no key, passphrase changed, or bad file).
+async function unlockWithStoredKey(file) {
+  const k = await keyDB.get();
+  if (!k || k.salt !== file.salt) return null;
+  try { return await decryptLists(file, k.key); } catch { return null; }
+}
 
 // ---- State ---------------------------------------------------------------
 const store = {
   get(k, d) { try { const v = localStorage.getItem("fxgrid:" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("fxgrid:" + k, JSON.stringify(v)); } catch {} },
 };
-const tabNames = Object.keys(DEFAULT_TABS);
+let tabNames = [];  // set by setTabs() once the lists are decrypted
 const defaultCols = window.innerWidth < 600 ? 2 : window.innerWidth < 1000 ? 3 : 4;
 let state = {
-  tab: store.get("tab", tabNames[0]),
+  tab: store.get("tab", null),
   range: store.get("range", "1D"),
   cols: store.get("cols", defaultCols),
   theme: store.get("theme", matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"),
   custom: store.get("custom", {}),
 };
-if (!tabNames.includes(state.tab)) state.tab = tabNames[0];
+function setTabs(tabs) {
+  TABS = tabs;
+  tabNames = Object.keys(TABS);
+  if (!tabNames.includes(state.tab)) state.tab = tabNames[0];
+}
 
 const $ = (id) => document.getElementById(id);
-const symbolsFor = (tab) => state.custom[tab] || DEFAULT_TABS[tab].symbols;
+const symbolsFor = (tab) => state.custom[tab] || TABS[tab].symbols;
 const parse = (line) => {
   const [sym, label, note] = line.split("|").map((s) => (s || "").trim());
   return { sym, label: label || sym.split(":").pop(), note: note || "" };
@@ -297,6 +299,7 @@ function loadTile(w) {
 }
 
 function renderGrid() {
+  if (!TABS) return;
   const grid = $("grid");
   if (io) io.disconnect();
   io = "IntersectionObserver" in window
@@ -313,7 +316,7 @@ function renderGrid() {
   grid.style.setProperty("--cols", state.cols);
   // +18px over the old heights makes room for the attribution line.
   grid.style.setProperty("--tile-h", state.cols >= 4 ? "198px" : state.cols == 1 ? "238px" : "208px");
-  $("tabNote").innerHTML = DEFAULT_TABS[state.tab].note;
+  $("tabNote").innerHTML = TABS[state.tab].note || "";
   for (const line of symbolsFor(state.tab)) {
     if (!line.trim() || line.trim().startsWith("#")) continue;
     const { sym, label, note } = parse(line);
@@ -355,6 +358,15 @@ $("saveBtn").onclick = () => {
 $("resetBtn").onclick = () => {
   delete state.custom[state.tab]; store.set("custom", state.custom); closeEditor(); renderGrid();
 };
+// Copies this tab as a lists.local.json entry, so a phone edit can be made permanent on the PC.
+$("copyBtn").onclick = async () => {
+  const symbols = $("editText").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  const text = JSON.stringify({ [state.tab]: { note: TABS[state.tab].note || "", symbols } }, null, 2).slice(2, -2);
+  try { await navigator.clipboard.writeText(text); $("copyBtn").textContent = "Copied"; }
+  catch { $("copyBtn").textContent = "Copy failed"; }
+  setTimeout(() => { $("copyBtn").textContent = "Copy as JSON"; }, 1500);
+};
+$("lockBtn").onclick = async () => { await keyDB.clear(); location.reload(); };
 
 // Clock: show Seoul / London / New York so you know which session is driving the move.
 function tick() {
@@ -363,14 +375,52 @@ function tick() {
 }
 tick(); setInterval(tick, 30000);
 
-// Rebuild widgets when the app comes back to the foreground (iOS suspends iframes).
+// Back in the foreground after >5 min: pick up lists pushed meanwhile, and rebuild widgets
+// (iOS suspends iframes). The home-screen app often resumes rather than relaunches.
 let hiddenAt = 0;
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) hiddenAt = Date.now();
-  else if (hiddenAt && Date.now() - hiddenAt > 5 * 60 * 1000) renderGrid();
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (!TABS || !hiddenAt || Date.now() - hiddenAt < 5 * 60 * 1000) return;
+  const file = await fetchLists();
+  const tabs = file && await unlockWithStoredKey(file);
+  if (tabs) { setTabs(tabs); renderTabs(); }
+  renderGrid();
 });
 
-applyTheme(); renderTabs(); renderGrid();
+function start(tabs) {
+  setTabs(tabs);
+  document.body.classList.remove("locked");
+  renderTabs(); renderGrid();
+}
+
+async function boot() {
+  applyTheme();
+  const msg = (t) => { $("lockMsg").textContent = t; };
+  if (!window.crypto?.subtle) { msg("Needs HTTPS (or localhost) to decrypt."); $("unlockBtn").disabled = true; return; }
+  const file = await fetchLists();
+  if (!file) { msg("Couldn't load lists.enc.json."); $("unlockBtn").disabled = true; return; }
+  const tabs = await unlockWithStoredKey(file);
+  if (tabs) return start(tabs);
+  $("lock").onsubmit = async (e) => {
+    e.preventDefault();
+    const pass = $("pass").value;
+    if (!pass) return;
+    $("unlockBtn").disabled = true; msg("Unlocking…");  // PBKDF2 600k takes ~0.5–1 s on a phone
+    try {
+      const key = await deriveKey(pass, file);
+      const tabs = await decryptLists(file, key);
+      await keyDB.set({ salt: file.salt, key });
+      $("pass").value = ""; msg("");
+      start(tabs);
+    } catch {
+      msg("Wrong passphrase.");
+    } finally {
+      $("unlockBtn").disabled = false;
+    }
+  };
+  $("pass").focus();
+}
+boot();
 </script>
 </body>
 </html>

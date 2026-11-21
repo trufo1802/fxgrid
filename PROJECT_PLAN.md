@@ -10,7 +10,7 @@ GitHub Pages serves repo root, `.nojekyll` present). Last updated 2026-11-21 (re
 | 1 | Attribution fix + publish to GitHub Pages | **Done** |
 | 2 | Lazy-load tiles + load-time readout | **Done in code** |
 | 2b | iPhone test: first screen <3 s on LTE, no blank tiles after background | **To do — first, 5 min** |
-| 3 | Passphrase lock + watchlists synced PC → iPhone | To do |
+| 3 | Passphrase lock + watchlists synced PC → iPhone | **Done** — live; iPhone unlock not yet checked |
 | 4 | Tap tile → full-screen advanced chart | To do |
 | 5 | Manual tile tint (green/red) | To do |
 | 6 | Movers tab | To do — prototype first (open question 1) |
@@ -90,7 +90,8 @@ Re-add the home-screen icon after M3 ships if the start URL or manifest changes.
 - In-page editor: keep as per-device override over synced lists; "Reset tab" now resets to the synced version.
   Add "Copy tab as JSON" so a phone edit can be pasted into `lists.local.json` on the PC.
 - Ship flow: edit `lists.local.json` → `node encrypt.mjs` → `git add lists.enc.json index.html && git commit && git push`.
-- Passphrase: long (≥5 random words) — ciphertext is public forever, offline brute force is the threat model.
+- Passphrase: script refuses <8 chars, warns <16. Ciphertext is public forever, so offline guessing is the
+  threat model; current one is short (owner's choice, low-stakes data). Strengthen with `--new-passphrase`.
   Lose it = re-encrypt with a new one; nothing else is lost.
 - The current default watchlists are already in public git history (commits `beb56c2`…`13f95b2`). Leave them
   (generic FX pairs) unless you decide otherwise — rewriting needs a force-push on `main`.
